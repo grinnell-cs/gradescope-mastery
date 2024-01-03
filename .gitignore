@@ -1,0 +1,13 @@
+# Temporary files
+*~
+*.swp
+*.bak
+
+# Weird Macintosh file
+.DS_Store
+
+# Since we may use CSV files for testing, we shouldn't include them 
+*.csv
+
+# The reports directory
+reports/
