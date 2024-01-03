@@ -1,0 +1,1137 @@
+#!/usr/bin/env perl
+
+# gsm gradefile options
+#   POD documentation at end.
+
+# +--------------+---------------------------------------------------
+# | Instructions |
+# +--------------+
+
+# This program is intended to help process the kinds of grade files we
+# get from Gradescope.  It was originally designed for CSC-151, but has
+# been expanded to permit other courses.
+
+# Before you download the grades file, please make sure to have it sort
+# by assignment name.
+
+# Note: If you are missing a module, you can use `cpan install Module`.
+# For example, `cpan install Text::CSV`.
+
+# +-----------------+------------------------------------------------
+# | Developer Notes |
+# +-----------------+
+
+# The command-line parsing is in the main section at the end of
+# the file.
+#
+# We start by processing the first line of the CSV file.  That
+# helps us identify the columns in which we can find various
+# pieces of information.  Here's some of the info we extract.
+#
+# * The `%columns` hash maps column names to column numbers.
+# * The `@headings` array maps column numbers back to column names.
+# * The `@LAs` array has the LA names (in order, I hope)
+# * The `%LAcols` maps LA names to arrays of LAs that assessed them
+#   (LAs can be assessed multiple times)
+# * The `@labs` array has the lab names in order.
+# * The `@readings` array has the reading names in order.
+# * The `@quizzes` array maps quizzes to column numberss.  (Day is index)
+# * The `@makeups` array maps quiz makeups to column numbers.
+#
+# After we process the header row, we go on to do other work depending
+# on the action.  (We probably don't need to process the header row
+# in every case, but ....)
+#
+# More notes forthcoming.
+
+# +-------+----------------------------------------------------------
+# | To Do |
+# +-------+
+
+# [ ] Fix error with `col` when generating the list of LAs.
+# [ ] Add support for reading a "letter grade" file so that I can
+#     specify a different letter grade.
+# [ ] Move configuration to a separate file.
+# [ ] Clean up repetitive code between the different kinds of grades.
+#     (in studentReport)
+# [ ] Read through for things to improve.
+# [ ] Translate to Python?  (Or, better yet, to Racket)
+# [ ] Rewrite token usage (lowest to highest, rather than vv.)
+# [ ] Add support for reading the tokens file (optional?)
+
+# +------------------+-----------------------------------------------
+# | Modules and such |
+# +------------------+
+
+use strict;
+use warnings;
+
+use Data::Dumper qw(Dumper);
+use Text::CSV;
+use Switch;
+use List::Util qw[min max];
+use DateTime;
+use Pod::Usage;
+use ConfigReader::Simple;
+
+use Getopt::Long qw(GetOptions);
+Getopt::Long::Configure qw(gnu_getopt);
+
+# +----------+-------------------------------------------------------
+# | Settings |
+# +----------+
+
+my %settings = (
+  course => "COURSE",
+  instructorEmail => "instructor\@grinnell.edu",
+
+  includeGrades => 0,           # Do we include grades in the report
+
+  processLAs => 0,              # Do we process LAs?
+  lasCount => 0,
+  lasLevels => [ qw(1 1 1 1) ], # A,B,C,D
+
+  processMPs => 0,              # Do we process MPs
+  mpsCount => 0,        
+
+  processLabs => 0,             # Do we process labs?
+  labsCount => 0,               
+
+  processMeta => 0,             # Do we process metacognitive reflections?
+  metasCount => 0,
+
+  processQuizzes => 0,          # Do we process quizzes?
+  quizzesCount => 0,
+
+  processReadings=> 0,          # Do we process readings?
+  readingsCount => 0,
+
+);
+
+my @lasLevels;          # A,B,C,D
+
+my @mpsA = (5,3,0);     # E,M,R
+my @mpsB = (3,4,1);     # E,M,R
+my @mpsC = (2,4,2);     # E,M,R
+my @mpsD = (1,3,2);     # E,M,R
+
+my @quizzesLevels = (16,13,10,5,0);       # A,B,C,D,F
+
+my @labsLevels = (26,24,21,15,0);          # A,B,C,D,F
+
+my @readingsLevels = (25,23,20,15,0);      # A,B,C,D,F
+
+my $numClasses = 42;
+
+my $oldTokens = 0;                      # Do we show earned tokens (old model)?
+my $showTokens = 1;                     # Do we show tokens
+my $processTokens = 0;                  # Do we handle overspending?
+my $maxTokenDebt = 10;
+
+# +---------+--------------------------------------------------------
+# | Globals |
+# +---------+
+
+my $log;        # Are we tracing (can set on command line)
+my @headings;   # Column headings
+my %columns;    # Map of headings to column number
+my $fname;      # The source file (set from command line)
+my $FILE;       # The file we're reading
+my $csv;        # The CSV parser
+my $configFile = "gsmrc";     
+                # The configuration file
+my $tokensFile = "tokens.txt"; 
+                # The file that stores the tokens
+my $gradesFile = "grades.txt";
+                ; # The file that stores letter grades
+
+my @LAs;        # The list of LAs we have, in order
+my %LAcols;     # The indices of the columns for each LA
+
+my @MPv0s;      # The indices of v0 of each MP
+my @MPv1s;      # The indices of v1 (redo) of each MP
+my @MPv2s;      # The indices of v2 (re-redo) of each MP
+my @MPv3s;      # The indices of v3 (re-redo) of each MP
+
+my @quizzes;    # An array of potential quizzes, mapping to indices
+my @makeups;    # An array of potential quiz makeups, mapping to indices
+
+my @meta;       # The list of metacognitive reflections, in order.
+my $metasMissed = 0;
+                # The number of metacognitive reflections that have been missed
+
+my @labs;       # The list of labs we have, in order
+my @readings;   # The list of readings we have, in order
+
+my @tokens;     # The list of tokens
+my @grades = ();# The list of grades
+
+my $action = "Report";
+                # The selected action
+
+my $help = 0;   # Do we want the short help?
+my $docs = 0;   # Do we want the longer docs?
+
+my $config = ConfigReader::Simple->new();
+
+# +-----------+------------------------------------------------------
+# | Utilities |
+# +-----------+
+
+# calculateSpending($port, $letter, $type, $tokens, $available)
+#  Calculate how much of the available resource we spend
+sub calculateSpending($$$$$)  {
+  my ($port, $letter, $type, $tokens, $available) = @_;
+  if ($tokens == 0) { return 0; }
+  if ($available <= 0) { return 0; }
+  my $spend = min $tokens, $available;
+  if ($spend == 1) {
+    LOGandPRINT($port, "  Using 1 $letter-level $type on token debt.");
+  }
+  elsif ($type eq "quiz") {   # HACK!
+    LOGandPRINT($port, "  Using $spend $letter-level quizzes on token debt.");
+  }
+  else {
+    LOGandPRINT($port, "  Using $spend $letter-level ${type}s on token debt.");
+  }
+  return $spend;
+} # calculateSpending
+
+# column($name,@fields)
+#  Grab a column from the fields
+sub column($@) {
+  my ($name, @fields) = @_;
+  my $col = $columns{$name};
+  LOG("$name is column $col");
+  return $fields[$col];
+} # grab a column from the data
+
+# computeGradeComponent($count,@levels)
+#   Compute the grade on one of the components that just uses
+#   levels (LAs, readings, etc.)
+sub computeGradeComponent($@) {
+  my ($count,@levels) = @_;
+  if ($count >= $levels[0]) { return "A"; }
+  elsif ($count >= $levels[1]) { return "B"; }
+  elsif ($count >= $levels[2]) { return "C"; }
+  else { return "F"; }
+} # computeGradeComponent
+
+# findLevel($count, @levelInfo)
+#   Finds the appropriate level for a particular type of grade (e.g., labs).
+#   A level is appropriate if the student is above or at that level.   
+#   levelInfo has the form [countForA,countForB,countforC]
+sub findLevel($@) {
+  my ($count,@levels) = @_;
+  for (my $i = 0; $i <= 2; $i++) {
+    if ($count >= $labsLevels[$i]) { return $i; }
+  } # for
+  return 3;
+} # findLevel
+
+# gradeLab($num)
+#   Convert a lab grade to the appropriate scale/symbol
+sub gradeLab($) {
+  my ($num) = @_;
+  if (!$num) { $num = 0; }
+  my $grade = " ";
+  if ($num >= 1.0) { $grade = "X"; }
+  # elsif ($num >= 0.1) { $grade = "/"; }
+  return $grade;
+} # gradeLab
+
+# gradeNRME($num)
+#  Convert a grade to the I/R/M/E scale
+sub gradeNRME($) {
+  my ($num) = @_;
+  if ($num eq "") { return " "; }
+  my $grade = "I";
+  $num = int($num);
+  if ($num >= 2.5) { $grade = "E"; }
+  elsif ($num >= 1.5) { $grade = "M"; }
+  elsif ($num >= 0.5) { $grade = "R"; }
+  return $grade;
+} # gradeNRME
+
+# gradeReading($num)
+#   Gradings for readings, which are less strict.
+sub gradeReading($) {
+  my ($num) = @_;
+  my $grade = " ";
+  if ($num eq "") { $num = 0; }
+  if ($num >= 0.5) {
+    $grade = "X";
+  }
+  return $grade;
+} # gradeReading
+
+# gradeSU($num)
+#   Convert a grade to the S/U pair
+sub gradeSU($) {
+  my ($num) = @_;
+  my $grade = "U";
+  if ($num eq "1.0") { $grade = "S"; }
+  return $grade;
+} # gradeSU
+
+# header($handle,$str,$char)
+#   Prints an underlined version of str to the filehandle.
+sub header($$$) {
+  my ($handle,$str,$char) = @_;
+  print $handle $str . "\n";
+  print $handle underline($str,$char) . "\n\n";
+} # header
+
+# LOG($msg)
+#   Print a tracing message when tracing is on.
+sub LOG($) {
+  if ($log) {
+    my ($msg) = @_;
+    print STDERR "*** ", $msg, "\n";
+  }
+} # LOG
+
+# LOGandPRINT($port,$msg)
+#   Log the message and print to the given port, followed by a newline
+sub LOGandPRINT($$) {
+ my ($port,$msg) = @_;
+ LOG($msg);
+ print $port $msg, "\n";
+} # sub
+
+# mpGradeCriteria($E,$M,$R,@criteria)
+#   See if the candidate meets the criteria for a particular level
+#   of mini-project grade.
+sub mpGradeCriteria($$$@) {
+  my($E,$M,$R,@criteria) = @_;
+  return (($E >= $criteria[0])
+          && (($E+$M) >= ($criteria[0]+$criteria[1]))
+          && (($E+$M+$R) >= ($criteria[0]+$criteria[1]+$criteria[2])));
+} # mpCriteria
+
+# nullToZero($val)
+#   If the value is null or the empty string, returns 0
+#   Otehrwise, returns the vaue
+sub nullToZero($) {
+  my ($val) = @_;
+  if (!$val) { return "0"; }
+  else { return $val; }
+} # nullToZero
+
+# underline($str, $char)
+#   Create an underline for $str using the appropriate number of
+#   copies of $char.
+#
+#   Not a particularly efficient version, but I'm feeling lazy.
+sub underline($$) {
+  my ($str,$char) = @_;
+
+  my $result = "";
+  for (my $i = 0; $i < length($str); $i++) {
+    $result .= $char;
+  } # for
+
+  return $result;
+} # underline
+
+# +---------+--------------------------------------------------------
+# | Actions |
+# +---------+
+
+# emailStudent(@fields)
+#   Send email to the given student
+sub emailStudent(@) {
+  my (@fields) = @_;
+
+  my $fname = column("First Name", @fields);
+  my $lname = column("Last Name", @fields);
+  my $name = "$fname $lname";
+  # my $name = column("Name", @fields);
+  my $email = column("Email", @fields);
+  my $uid  = $email;
+  $uid =~ s/@.*//;
+
+  my $cmd = "cat $uid.txt | mutt -s '[$settings{'course'}] Grade Report for $name ($uid)' -c $settings{'instructorEmail'} $email";
+  print $cmd, "\n";
+} # emailStudent
+
+# studentReport($row)
+#   Reports on the student from the given row
+sub studentReport($) {
+  my ($row) = @_;
+
+  $csv->parse($row) or die("Could not parse line: $row");
+  my @line = $csv->fields;
+
+  my $fname = column("First Name", @line);
+  my $lname = column("Last Name", @line);
+  my $name = "$fname $lname";
+  # my $name = column("Name", @line);
+  my $email = column("Email", @line);
+  my $uid = $email;
+  $uid =~ s/@.*//;
+  my $dt = DateTime->now;
+
+  LOG("Processing $name ($uid)");
+
+  if (! -d "reports") { mkdir "reports"; }
+  open(my $STUDENT, "> reports/$uid.txt");
+
+  header($STUDENT, "$settings{'course'} Grade report for $name ($uid)", "=");
+  my $y = $dt->year;
+  my $m = $dt->month;
+  my $d = $dt->day;
+  if ($m < 10) { $m = "0$m"; }
+  if ($d < 10) { $d = "0$d"; }
+  print $STUDENT <<"OPENING";
+Grades as of $y-$m-$d
+
+This is an experimental grade report.  Grades are not yet intended
+to be completely accurate; nonetheless, the report should give you
+a general sense as to where you stand in the course.  Feel free to
+send me comments, corrections, and questions.
+
+Notation:
+  [ ]: Not completed to an acceptable level
+  [.]: Not completed to an acceptable level
+  [I]: Not completed to an acceptable level
+  [X]: Completed satisfactorily
+  [x]: Completed satisfactorily
+  [S]: Completed satisfactorily
+  [/]: 1/2 credit (on labs writeups)
+  [E]: Excellent (on Mini-Projects)
+  [M]: Meets expectations (on Mini-Projects)
+  [R]: Recommended redo (on Mini-Projects)
+
+OPENING
+
+  # Process the Readings
+  my $readingsGrade = "A";
+  my $readingsPassed = 0;
+  my $readingsMissed = 0;
+  my $readingsText = "";
+  my $incompleteText = "";
+  my $rcount = 0;
+  if ($settings{'processReadings'}) {
+    LOG("  Processing readings");
+    $readingsGrade = "?";
+    foreach my $reading (@readings) {
+      ++$rcount;
+      if ($rcount <= $settings{'readingsCount'}) {
+        my $col = column($reading, @line);
+        my $grade = gradeReading($col);
+        if ($grade eq "X") {
+          ++$readingsPassed;
+        }
+        elsif ($grade eq "/") {
+          $readingsPassed += 0.5;
+        }
+        if ($reading !~ m/^Incomplete/) {
+          $readingsText .= "[$grade] $reading\n";
+        }
+        elsif ($col ne "") {
+          $incompleteText .= "[$grade] Makeup for $reading\n";
+        }
+      } # if ($rcount <= $settings{readingsCount})
+    } # foreach
+    $readingsGrade = computeGradeComponent($readingsPassed, @readingsLevels);
+    header($STUDENT,
+           "Readings ($readingsPassed of $settings{'readingsCount'})",
+           "-");
+    $readingsMissed = $settings{'readingsCount'} - $readingsPassed;
+    print $STUDENT $readingsText;
+    print $STUDENT $incompleteText;
+    print $STUDENT "\n";
+  } # if $processReadings 
+
+  # Process the Labs
+  my $labsGrade = "A";
+  my $labsPassed = 0;
+  my $labsMissed = 0;
+  my $labsText = "";
+  my $count = 0;
+  if ($settings{'processLabs'}) {
+    LOG("  Processing labs");
+    $incompleteText = "";
+    $labsGrade = "?";
+    foreach my $lab (@labs) {
+      ++$count;
+      if ($count <= $settings{'labsCount'}) {
+        my $num = column($lab, @line);
+        my $grade = gradeLab($num);
+        if ($grade eq "X") { $labsPassed++; }
+        if ($lab !~ m/^Incomplete/) {
+          $labsText .= "[$grade] $lab\n";
+        }
+        elsif ($num ne "") {
+          $incompleteText .= "[$grade] Makeup for $lab\n";
+        }
+      } # if ($count <= $labsCount)
+    } # foreach
+    $labsGrade = computeGradeComponent($labsPassed, @labsLevels);
+    header($STUDENT,
+           "Labs ($labsPassed of $settings{'labsCount'})",
+           "-");
+    $labsMissed = $settings{'labsCount'} - $labsPassed;
+    print $STUDENT $labsText;
+    print $STUDENT $incompleteText;
+    print $STUDENT "\n";
+  } # if ($processLabs)
+
+  # Process the Quizzes
+  my $quizzesGrade = "?";
+  my $quizzesPassed = 0;
+  my $quizzesText = "";
+  if ($settings{'processQuizzes'}) {
+    LOG("  Processing quizzes");
+    for (my $class = 1; $class <= $numClasses; $class++) {
+       my $col = $quizzes[$class];
+       my $col2 = $makeups[$class];
+       if ($col) {
+         if (gradeSU($line[$col]) eq "S") {
+           $quizzesText .= "[S] $headings[$col]\n";
+           ++$quizzesPassed;
+         } # if first quiz is satisfactory
+         elsif ($col2 && (gradeSU($line[$col2]) eq "S")) {
+           $quizzesText .= "[S] $headings[$col2]\n";
+           ++$quizzesPassed;
+         } # if first quiz grade is U and makeup is S
+         else {
+           $quizzesText .= "[ ] $headings[$col]\n";
+         }
+       } # if there is a quiz for the class
+    } # for
+    $quizzesGrade = computeGradeComponent($quizzesPassed, @quizzesLevels);
+    header($STUDENT,
+           "Quizzes ($quizzesGrade: $quizzesPassed of $settings{quizzesCount})",
+           "-");
+    print $STUDENT $quizzesText . "\n";
+  } # if ($processQuizzes)
+
+  # Process the MPs
+  my $mpsPassed = 0;
+  my $mpsGrade = "?";
+  my $mpEs = 0;
+  my $mpMs = 0;
+  my $mpRs = 0;
+  if ($settings{'processMPs'}) {
+    LOG("  Processing MPs");
+    my $mpsText = "";
+    for (my $mp = 1; $mp <= $settings{'mpsCount'}; $mp++) {
+      LOG("    Processing MP $mp");
+      my @cols = ($MPv0s[$mp], $MPv1s[$mp], $MPv2s[$mp], $MPv3s[$mp]);
+      my $bestnum = 0;
+      my $heading = "MP $mp";
+      my $nullScore = 1;
+      if ($MPv0s[$mp]) {
+        $heading = $headings[$MPv0s[$mp]];
+      } # if there is a version 0.
+      foreach my $col (@cols) {
+        if ($col) {
+          my $score = $line[$col];
+          LOG("      '$score' on $headings[$col]");
+          if ($score ne "") {
+            $nullScore = 0;
+            my $num = nullToZero($score);
+            if ($num > $bestnum) {
+              LOG("      REPLACING score");
+              $bestnum = $num;
+              $heading = $headings[$col];
+            } # if the new number is better
+          } # if the score is not null
+        } # if the column is defined
+      } # foreach
+
+      # Process information
+      my $letter = $nullScore ? " " : gradeNRME($bestnum);
+      if ($letter eq "E") { ++$mpEs; }
+      elsif ($letter eq "M") { ++$mpMs; }
+      elsif ($letter eq "R") { ++$mpRs; }
+      $mpsText .= "[$letter] $heading\n";
+      LOG("      $letter for $heading");
+    } # for
+
+    if (mpGradeCriteria($mpEs, $mpMs, $mpRs, @mpsA)) { $mpsGrade = "A"; }
+    elsif (mpGradeCriteria($mpEs, $mpMs, $mpRs, @mpsB)) { $mpsGrade = "B"; }
+    elsif (mpGradeCriteria($mpEs, $mpMs, $mpRs, @mpsC)) { $mpsGrade = "C"; }
+    elsif (mpGradeCriteria($mpEs, $mpMs, $mpRs, @mpsD)) { $mpsGrade = "D"; }
+    else { $mpsGrade = "F"; }
+
+    if ($settings{'includeGrades'}) {
+      header($STUDENT,
+             "Mini-Projects ($mpsGrade: $mpEs Es, $mpMs Ms, and $mpRs Rs)",
+             "-");
+    } else {
+      header($STUDENT,
+             "Mini-Projects ($mpEs Es, $mpMs Ms, and $mpRs Rs)",
+             "-");
+    }
+    print $STUDENT $mpsText . "\n";
+  } # if $processMPs
+
+  # Process the Learning Assessments
+  my $lasPassed = 0;
+  my $lasGrade = "C";
+  if ($settings{'processLAs'}) {
+    LOG("  Processing LAs");
+    my $lasText = "";
+    foreach my $la (@LAs) {
+      my $completed = 0;
+      foreach my $col (split(",", $LAcols{$la})) {
+        my $grade = gradeSU($line[$col]);
+        if ((!$completed) && ($grade eq "S")) {
+          $completed = 1;
+          ++$lasPassed;
+          $lasText .= "[S] $headings[$col]\n";
+        }
+      }
+      if (!$completed) {
+        $lasText .= "[ ] LA: $la\n";
+      }
+    } # foreach
+    $lasGrade = computeGradeComponent($lasPassed, @lasLevels);
+  
+    if ($settings{'includeGrades'}) {
+      header($STUDENT,
+             "Learning Assessments ($lasGrade: $lasPassed of $settings{'lasCount'})",
+              "-");
+    } else {
+      header($STUDENT,
+             "Learning Assessments ($lasPassed of $settings{'lasCount'})",
+              "-");
+    }
+    print $STUDENT $lasText . "\n";
+  } # if processLAs
+
+  # Tokens
+  if ($oldTokens) {
+    LOG("  Processing tokens");
+    header($STUDENT, "Tokens", "-");
+    my $tokens = column("Tokens", @line);
+    if (!$tokens) { $tokens = 0; }
+    if ($tokens == 1) { print $STUDENT "1 token remains\n"; }
+    elsif ($tokens == 0) { print $STUDENT "No tokens remain\n"; }
+    elsif ($tokens > 0) { print $STUDENT "$tokens tokens remain\n"; }
+    else {
+      my $tmp = -$tokens;
+      print $STUDENT "You overspent $tmp tokens.  Overspent tokens negatively affect your final grade.\n";
+    }
+    print $STUDENT
+          "\nYou can find details on your tokens on the Tokens \"assignment\" on GradeScope.\n";
+
+    # What happens when they spend too many tokens?
+    if (($tokens < 0) && ($processTokens)) {
+      $tokens = -$tokens;
+      if ($tokens > $maxTokenDebt) { 
+        $tokens = $maxTokenDebt;
+        print $STUDENT "You will be charged $tokens tokens.\n";
+      }
+      my @letters = ("A","B","C","D","F");
+      my $level = 0;      # A
+
+      while (($tokens > 0) && ($level <= 3)) {
+        my $spend;    # Remaining tokens for an assessment
+        my $msg;      
+
+        # Redeem quizzes
+        $spend = calculateSpending($STUDENT, $letters[$level], "quiz", $tokens, 
+                                   $quizzesPassed - $quizzesLevels[$level]);
+        $quizzesPassed -= $spend;
+        $tokens -= $spend;
+
+        # Redeem readings
+        $spend = calculateSpending($STUDENT, $letters[$level], "reading", $tokens, 
+                                   $readingsPassed - $readingsLevels[$level]);
+        $readingsPassed -= $spend;
+        $tokens -= $spend;
+
+        # Redeem labs
+        $spend = calculateSpending($STUDENT, $letters[$level], "lab", $tokens, 
+                                   $labsPassed - $labsLevels[$level]);
+        $labsPassed -= $spend;
+        $tokens -= $spend;
+
+        # Redeem las
+        $spend = calculateSpending($STUDENT, $letters[$level], "LA", $tokens, 
+                                   $lasPassed - $lasLevels[$level]);
+        $lasPassed -= $spend;
+        $tokens -= $spend;
+
+        # And move on to the next level
+        ++$level;
+      } # while
+
+      if ($tokens > 0) {
+        LOGandPRINT($STUDENT, "  Ignoring the $tokens needed tokens that still remain.");
+      } # if
+
+      # Recompute all the grades
+      $readingsGrade = computeGradeComponent($readingsPassed, @readingsLevels);
+      $labsGrade = computeGradeComponent($labsPassed, @labsLevels);
+      $quizzesGrade = computeGradeComponent($quizzesPassed, @quizzesLevels);
+      $lasGrade = computeGradeComponent($lasPassed, @lasLevels);
+    } # Used too many tokens
+
+    print $STUDENT "\n";
+  } # if ($oldTokens)
+
+  my $tokenCount = 0;
+  if ($showTokens) {
+    my $tokensText = "";
+    foreach my $entry (@tokens) {
+      if ($entry =~ m/^$uid,/) {
+        my @entry = split /,/, $entry;
+        if ($entry[2]) { 
+          LOG("$uid: Adding tokens '$entry[2]' from '$entry'");
+          $tokenCount += $entry[2]; 
+          $tokensText .= "$entry[1]: $entry[3] [$entry[2]]\n";
+        } # if there's a score
+      } # if the entry matches
+    } # foreach
+    header($STUDENT,
+           "Tokens ($tokenCount)",
+           "-");
+    print $STUDENT $tokensText . "\n";
+  } # if ($showTokens)
+
+  # Metacognitive exercises
+  my $metasPassed = 0;
+  if ($settings{'processMeta'}) {
+    LOG("  Processing metacognitive reflections");
+    my $metaText = "";
+    foreach my $meta (@meta) {
+      LOG("$uid: checking grade for meta $meta");
+      my $grade = gradeSU(column($meta, @line));
+      if ($grade eq "S") {
+        ++$metasPassed;
+      } else {
+        $grade = " ";
+      }
+      $metaText .= "[$grade] $meta\n";
+    } # foreach
+    $metasMissed = $settings{'metasCount'} - $metasPassed;
+    header($STUDENT,
+           "Metacognitive exercises ($metasPassed of $settings{'metasCount'})",
+           "-");
+    print $STUDENT $metaText . "\n";
+  }
+
+  # A hack for before the end of the semester
+  if (!$settings{'includeGrades'}) {
+    $readingsGrade = " ";
+    $labsGrade = " ";
+    $quizzesGrade = " ";
+    $lasGrade = " ";
+    $mpsGrade = " ";
+  }
+
+  # Another hack to deal with the recent decision to ignore readings,
+  # labs, and quizzes.
+  $readingsGrade = " ";
+  $labsGrade = " ";
+  $quizzesGrade = " ";
+
+  # Final processing
+  LOG("  Final processing");
+  header($STUDENT, "Final Computations", "-");
+  if ($settings{'processReadings'}) { 
+    print $STUDENT 
+          "Readings: $readingsGrade ($readingsPassed / $settings{'readingsCount'})\n"; 
+  }
+  if ($settings{'processLabs'}) { 
+    print $STUDENT 
+          "Labs:     $labsGrade ($labsPassed / $settings{'labsCount'})\n"; 
+  }
+  if ($settings{'processQuizzes'}) { 
+    print $STUDENT 
+          "Quizzes:  $quizzesGrade ($quizzesPassed / $settings{'quizzesCount'})\n"; 
+  }
+  if ($settings{'processMPs'}) {
+    print $STUDENT
+          "MPs:      $mpsGrade ($mpEs Es, $mpMs Ms, and $mpRs Rs)\n";
+  }
+  if ($settings{'processLAs'}) {
+    print $STUDENT 
+          "LAs:      $lasGrade ($lasPassed / $settings{'lasCount'})\n";
+  }
+  print $STUDENT "\n";
+
+  if ($showTokens) {
+    print $STUDENT "Tokens:     $tokenCount\n";
+  }
+  if ($settings{'processMeta'}) {
+    print $STUDENT "Metas:      $metasPassed / $settings{'metasCount'}\n";
+  }
+  my $totalMissed = $readingsMissed + $labsMissed + $metasMissed;
+  if ($totalMissed) {
+    print $STUDENT "Missed:     $totalMissed (";
+    if ($readingsMissed) {
+      print $STUDENT ($readingsMissed == 1) ? "1 reading, " : "$readingsMissed readings, ";
+    }
+    if ($labsMissed) {
+      print $STUDENT ($labsMissed == 1) ? "1 lab" : "$labsMissed labs";
+    }
+    if ($metasMissed && $settings{'processMeta'}) {
+      print $STUDENT ($metasMissed == 1) ? ", 1 metacognitive reflection" : ", $metasMissed metacognitive reflections";
+    }
+    print $STUDENT ")\n\n";
+  } # if things were missed
+
+  if ($settings{'includeGrades'}) {
+    my @letters = ( "A", "B", "C", "D", "F" );
+    my %letterLevels = ( "A" => 0, "B" => 1, "C" => 2, "D" => 3, "F" => 4, "?" => 0 );
+    my $mpsLevel = $letterLevels{$mpsGrade};
+    my $lasLevel = $letterLevels{$lasGrade};
+    my $maxLevel = max($mpsLevel, $lasLevel);
+    my $grade = $letters[$maxLevel];
+    if ($mpsLevel + $lasLevel != 2*$maxLevel) {
+      $grade = $letters[$maxLevel-1] . "-";
+    }
+    my $fixedGrade;
+    foreach my $entry (@grades) {
+      if ($entry =~ m/^$uid,/) {
+        my @entry = split /,/, $entry;
+        $fixedGrade = $entry[1];
+      }
+    } # foreach
+    if ($fixedGrade) {
+      print $STUDENT "Grade: $fixedGrade\n";
+    } else {
+      print $STUDENT "Prospective grade: $grade\n";
+    } # 
+  } # if $includeGrades
+
+  close($STUDENT);
+}
+
+sub reportFinalGradeOld($$$$$$) {
+  my ($STUDENT, $readingsGrade, $labsGrade, $quizzesGrade, $mpsGrade, $lasGrade) = @_;
+  
+  my @letters = ( "A", "B", "C", "D", "F" );
+  my %letterLevels = ( "A" => 0, "B" => 1, "C" => 2, "D" => 3, "F" => 4, "?" => 0 );
+  my $readingsLevel = $letterLevels{$readingsGrade};
+  my $labsLevel = $letterLevels{$labsGrade};
+  my $quizzesLevel = $letterLevels{$quizzesGrade};
+  my $mpsLevel = $letterLevels{$mpsGrade};
+  my $lasLevel = $letterLevels{$lasGrade};
+  
+  my $tier = max $readingsLevel,$labsLevel,$quizzesLevel,$mpsLevel,$lasLevel;
+
+  if ($tier < 3) {
+    if (($mpsLevel < $tier) || ($lasLevel < $tier)) {
+      if (($mpsLevel < $tier) && ($lasLevel < $tier)) {
+        print $STUDENT "Grade:    ", $letters[$tier-1], "-\n";
+        print $STUDENT "  Base tier: ", $letters[$tier], "\n";
+        print $STUDENT "  Both MPs and LAs are at a higher grade.\n";
+      } # mps and las at next tier
+ 
+      elsif (($readingsLevel < $tier) 
+             && ($labsLevel < $tier) 
+             && ($quizzesLevel < $tier)) {
+        print $STUDENT "Grade:    ", $letters[$tier-1], "-\n";
+        print $STUDENT "  Base tier: ", $letters[$tier], "\n";
+        print $STUDENT "  Either MPs or LAs are at a higher grade.\n";
+        print $STUDENT "  All of readings, labs and quizzes are at a higher grade.\n";
+      } # one of mp3/las and all the rest
+
+      else {
+        print $STUDENT "Grade:    ", $letters[$tier], "+\n";
+        print $STUDENT "  Base tier: ", $letters[$tier], "\n";
+        print $STUDENT "  Either MPs or LAs are at a higher grade.\n";
+      }
+    } # mp3s or las at next level
+    else {
+      print $STUDENT "Grade:    ", $letters[$tier];
+      print $STUDENT "  Base tier: ", $letters[$tier], "\n";
+      print $STUDENT "  No adjustments.\n";
+    }
+  } # $tier < 3
+  
+  else {
+    my $count = int($readingsLevel/3) 
+              + int($labsLevel/3) 
+              + int($quizzesLevel/3)
+              + int($mpsLevel/3) 
+              + int($lasLevel/3);
+    $count = 5 - $count;
+    if ($count > 2) {
+      print $STUDENT "Grade:    D\n";
+    }
+    else {
+      print $STUDENT "Grade:    F\n";
+    }
+    print $STUDENT "  At least one F\n";
+    print $STUDENT "  $count at C or above\n";
+  }
+} # reportFinalGradeOld
+
+# summarizeLAs()
+#   Prints a summary of all the LAs
+sub summarizeLAs() {
+  my %counts;   # Counts of students who passed each LA
+  my %missing;  # Students who missed each LA
+  my $num_students;     # Number of students;
+
+  # Initialize counts
+  foreach my $la (@LAs) {
+    $counts{$la} = 0;
+    $missing{$la} = "";
+  } # foreach $la
+
+  # Process all the lines
+  while (my $line = <$FILE>) {
+    chomp($line);
+    $csv->parse($line) or die("Could not parse line: $line");
+    my @line = $csv->fields;
+    # my $student = column("First Name", @line) . " " . column("Last Name", @line);
+    my $student = column("Name", @line);
+    # LOG($student);
+    ++$num_students;
+    foreach my $la (@LAs) {
+      my $completed = 0;
+      foreach my $col (split(",", $LAcols{$la})) {
+        my $grade = gradeSU($line[$col]);
+        if ($grade eq "S"  ) {
+          $completed = 1;
+          # LOG("  completed $la on $headings[$col]");
+        }
+      }
+      if ($completed) {
+        $counts{$la} += 1;
+      } else {
+        $missing{$la} .= "; $student";
+      } # if (!$completed)
+    }
+  } # while
+
+  # Print the results
+  foreach my $la (@LAs) {
+    my $missing = $missing{$la};
+    $missing =~ s/^; //;
+    if ($missing) { print "[ ] "; }
+    else { print "[X] "; }
+    print $la;
+    print " ($counts{$la} of $num_students)\n";
+    if ($missing) {
+      print "  Missing: $missing\n";
+    }
+    print "\n";
+  } # foreach
+} # summarizeLAs
+
+# updateSettings()
+#   Update the configuration using $config
+sub updateSettings() {
+  # Copy from the config file to the settings hash
+  foreach my $entry ($config->directives()) {
+    my $val = $config->get($entry);
+    $settings{$entry} = $val;
+  } # foreach
+
+  # Update some of the arrays
+  if ($settings{'lasLevels'}) { 
+    @lasLevels = split(",",$settings{'lasLevels'}); 
+  }
+} # updateSettings
+
+# +------+-----------------------------------------------------------
+# | Main |
+# +------+
+
+# Get the initial options
+GetOptions(
+  'verbose|v' => \$log,
+  'action|a=s' => \$action,
+  'config|c' => \$configFile,
+  'tokens|t' => \$tokensFile,
+  'grades|g' => \$gradesFile,
+  'help|?' => \$help,
+  'docs' => \$docs
+);
+LOG("Verbose mode is ON");
+
+pod2usage(1) if $help;
+pod2usage(-verbose => 2) if $docs;
+
+# Read the config file if there is one
+if ($configFile) {
+  $config = ConfigReader::Simple->new($configFile);
+  updateSettings();
+} # if ($configFile)
+
+# Prepare to process the input file
+$fname = $ARGV[0];
+if (!$fname) {
+  print STDERR "Error: No file specified.\n";
+  pod2usage(1);
+}
+if (! -f $fname) {
+  print STDERR "Error: No such file: '$fname'\n";
+  pod2usage(1);
+}
+open ($FILE, "< $fname")
+  or die "Could not open '$fname'.";
+
+# Grab the tokens
+if (! -f $tokensFile) { $showTokens = 0; }
+if ($showTokens) {
+  open my $tokensHandle, "<", $tokensFile;
+  chomp(@tokens = <$tokensHandle>);
+  close $tokensHandle;
+}
+
+# Grab the grades
+if (-f $gradesFile) {
+  open my $gradesHandle, "<", $gradesFile;
+  chomp(@grades = <$gradesHandle>);
+  close $gradesHandle;
+} 
+
+# Prepare to process CSV
+$csv = Text::CSV->new();
+
+# Process headings
+my $headings = <$FILE>;
+chomp ($headings);
+
+$csv->parse($headings) or die("Could not parse headings: $headings");
+@headings = $csv->fields;
+for (my $i = 0; $i <= $#headings; $i++) {
+  my $h = $headings[$i];
+  if (($h !~ m/Max Points$/i)
+      && ($h !~ m/Submission Time$/i)
+      && ($h !~ m/Lateness \(H:M:S\)$/i)) {
+    $columns{$h} = $i;
+    my $heading = $h;
+    $h =~ s/^Incomplete //;
+    # LOG($h);
+    if ($h =~ m/LA: (.*) \((Phase \d),/) {
+      my $la = "$1 ($2)";
+      if ($LAcols{$la}) {
+        $LAcols{$la} .= ",$i";
+      } else {
+        # LOG("Adding LA '$la'");
+        push @LAs, $la;
+        $LAcols{$la} = "$i";
+      } # if the la is not already entered
+    } # if it's an la
+    elsif ($h =~ m/^Reading/) {
+      push @readings, $heading;
+    } #if it's a reading
+    elsif ($h =~ m/^Lab/) {
+      push @labs, $heading;
+    }
+    elsif ($h =~ m/^Quiz for Class (\d+)/i) {
+      $quizzes[$1] = $i;
+    }
+    elsif ($h =~ m/^Makeup Quiz for Class (\d+)/i) {
+      $makeups[$1] = $i;
+    }
+    elsif ($h =~ m/^Mini-Project (\d+) Original/i) {
+      $MPv0s[$1] = $i;
+    }
+    elsif ($h =~ m/^Mini-Project (\d+) Redo/i) {
+      $MPv1s[$1] = $i;
+    }
+    elsif ($h =~ m/^Mini-Project (\d+) Second Redo/i) {
+      $MPv2s[$1] = $i;
+    }
+    elsif ($heading =~ m/^Mini-Project (\d+) Third Redo/i) {
+      $MPv3s[$1] = $i;
+    }
+    elsif (($heading =~ m/^Pre/) || ($heading =~ m/^Post/)) {
+      push @meta, $heading;
+    }
+  } # if it's a useful column
+} # for
+
+@readings = sort @readings;
+@labs = sort @labs;
+
+# Handle actions
+switch ($action) {
+  case "LAs" {
+    summarizeLAs();
+  }
+  case "Report" {
+    while (my $row = <$FILE>) {
+      chomp($row);
+      studentReport($row);
+    } # while
+  }
+  case "Email" {
+    print <<"INSTRUCTIONS";
+For safety, this program does not send email directly.  Please copy the
+reports (from the reports directory) to a safe place on a MathLAN machine
+and then enter the following instructions to send email.
+
+INSTRUCTIONS
+    while (my $row = <$FILE>) {
+      $csv->parse($row) or die("Could not parse line: $row");
+      my @field = $csv->fields;
+      emailStudent(@field);
+    } # while
+  }
+  case "Summary" {
+    print "Summaries are not yet available\n";
+  }
+  else {
+    print STDERR "Undefined action: $action\n";
+    pod2usage(1);
+  }
+}
+
+# Final tracing info
+if ($log) {
+}
+
+# Clean up
+close($FILE);
+
+__END__
+
+=head1 NAME
+
+gsm - Produce a report for student data from Gradescope.
+
+=head1 SYNOPSIS
+
+gsm [options] file.csv
+
+  -a ACTION     Choose the action
+     Email              Generate commands to send email to all students
+     Report             Generate reports for all students
+     LAs                Generate information on the LAs
+     Summary            Generate a summary of how students did        
+
+  -c FILE       Select a configuration file
+
+  -g FILE       Select a grades file (Uses grades.txt by default)
+                Each line in the file has the form
+                  username,grade
+
+  -t FILE       Select a tokens file (Uses tokens.txt by default)
+                Each line in the file has the form
+                  username,date,points,comments
+
+  -v            Verbose mode
+
+=head1 OPTIONS
+
+=head1 DESCRIPTION
+
+Processes the data from Gradescope to produce one of the kinds of
+mastery grading reports that we prefer, including individual students
+grade reports, a list of outstanding learning assessments, and other
+similar stuff.
+
+=head1 AUTHOR
+
+Samuel A. Rebelsky
+
+=head1 LICENSE
+
+Released under some FLOSS license yet to be determined.  What's
+your favorite?
+
+=cut

@@ -1,0 +1,3 @@
+rebelsky,2024-01-01,+3,initial tokens
+rebelsky,2024-01-02,-1,late assignment
+rebelsky,2024-01-03,+1,event 1: mentor session
