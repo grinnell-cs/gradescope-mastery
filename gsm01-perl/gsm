@@ -81,6 +81,7 @@ Getopt::Long::Configure qw(gnu_getopt);
 # | Settings |
 # +----------+
 
+# Most of these settings will eventually be read from the settings file.
 my %settings = (
   course => "COURSE",
   instructorEmail => "instructor\@grinnell.edu",
@@ -97,7 +98,7 @@ my %settings = (
   processLabs => 0,             # Do we process labs?
   labsCount => 0,               
 
-  processMeta => 0,             # Do we process metacognitive reflections?
+  processMetas => 0,            # Do we process metacognitive reflections?
   metasCount => 0,
 
   processQuizzes => 0,          # Do we process quizzes?
@@ -124,7 +125,7 @@ my @readingsLevels = (25,23,20,15,0);      # A,B,C,D,F
 my $numClasses = 42;
 
 my $oldTokens = 0;                      # Do we show earned tokens (old model)?
-my $showTokens = 1;                     # Do we show tokens
+my $showTokens = 0;                     # Do we show tokens
 my $processTokens = 0;                  # Do we handle overspending?
 my $maxTokenDebt = 10;
 
@@ -696,7 +697,7 @@ OPENING
 
   # Metacognitive exercises
   my $metasPassed = 0;
-  if ($settings{'processMeta'}) {
+  if ($settings{'processMetas'}) {
     LOG("  Processing metacognitive reflections");
     my $metaText = "";
     foreach my $meta (@meta) {
@@ -759,7 +760,7 @@ OPENING
   if ($showTokens) {
     print $STUDENT "Tokens:     $tokenCount\n";
   }
-  if ($settings{'processMeta'}) {
+  if ($settings{'processMetas'}) {
     print $STUDENT "Metas:      $metasPassed / $settings{'metasCount'}\n";
   }
   my $totalMissed = $readingsMissed + $labsMissed + $metasMissed;
@@ -771,7 +772,7 @@ OPENING
     if ($labsMissed) {
       print $STUDENT ($labsMissed == 1) ? "1 lab" : "$labsMissed labs";
     }
-    if ($metasMissed && $settings{'processMeta'}) {
+    if ($metasMissed && $settings{'processMetas'}) {
       print $STUDENT ($metasMissed == 1) ? ", 1 metacognitive reflection" : ", $metasMissed metacognitive reflections";
     }
     print $STUDENT ")\n\n";
@@ -1005,7 +1006,7 @@ for (my $i = 0; $i <= $#headings; $i++) {
     my $heading = $h;
     $h =~ s/^Incomplete //;
     # LOG($h);
-    if ($h =~ m/LA: (.*) \((Phase \d),/) {
+    if ($h =~ m/^LA: (.*) \((Phase \d),/) {
       my $la = "$1 ($2)";
       if ($LAcols{$la}) {
         $LAcols{$la} .= ",$i";
@@ -1104,7 +1105,7 @@ gsm [options] file.csv
      LAs                Generate information on the LAs
      Summary            Generate a summary of how students did        
 
-  -c FILE       Select a configuration file
+  -c FILE       Select a configuration file (Uses gsmrc by default)
 
   -g FILE       Select a grades file (Uses grades.txt by default)
                 Each line in the file has the form
