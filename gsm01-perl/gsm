@@ -203,7 +203,11 @@ sub calculateSpending($$$$$)  {
 sub column($@) {
   my ($name, @fields) = @_;
   my $col = $columns{$name};
-  LOG("$name is column $col");
+  if ($col) {
+    LOG("$name is column $col");
+  } else {
+    LOG("$name is an undefined column");
+  }
   return $fields[$col];
 } # grab a column from the data
 
@@ -374,6 +378,10 @@ sub studentReport($) {
   my $dt = DateTime->now;
 
   LOG("Processing $name ($uid)");
+  if ($name =~ m/Dropped/i) {
+    LOG("Skipping $name; dropped the class.");
+    return;
+  }
 
   if (! -d "reports") { mkdir "reports"; }
   open(my $STUDENT, "> reports/$uid.txt");
@@ -712,7 +720,7 @@ OPENING
     } # foreach
     $metasMissed = $settings{'metasCount'} - $metasPassed;
     header($STUDENT,
-           "Metacognitive exercises ($metasPassed of $settings{'metasCount'})",
+           "Metacognitive reflections ($metasPassed of $settings{'metasCount'})",
            "-");
     print $STUDENT $metaText . "\n";
   }
@@ -763,17 +771,25 @@ OPENING
   if ($settings{'processMetas'}) {
     print $STUDENT "Metas:      $metasPassed / $settings{'metasCount'}\n";
   }
+  if ($readingsMissed < 0) { $readingsMissed = 0; }
+  if ($labsMissed < 0) { $labsMissed = 0; }
+  if ($metasMissed < 0) { $metasMissed = 0; }
   my $totalMissed = $readingsMissed + $labsMissed + $metasMissed;
+  my $needsComma = 0;
   if ($totalMissed) {
     print $STUDENT "Missed:     $totalMissed (";
     if ($readingsMissed) {
-      print $STUDENT ($readingsMissed == 1) ? "1 reading, " : "$readingsMissed readings, ";
+      print $STUDENT ($readingsMissed == 1) ? "1 reading" : "$readingsMissed readings";
+      $needsComma = 1;
     }
     if ($labsMissed) {
+      if ($needsComma) { print $STUDENT ", "; }
       print $STUDENT ($labsMissed == 1) ? "1 lab" : "$labsMissed labs";
+      $needsComma = 1;
     }
     if ($metasMissed && $settings{'processMetas'}) {
-      print $STUDENT ($metasMissed == 1) ? ", 1 metacognitive reflection" : ", $metasMissed metacognitive reflections";
+      if ($needsComma) { print $STUDENT ", "; }
+      print $STUDENT ($metasMissed == 1) ? "1 metacognitive reflection" : "$metasMissed metacognitive reflections";
     }
     print $STUDENT ")\n\n";
   } # if things were missed
@@ -885,7 +901,8 @@ sub summarizeLAs() {
     $csv->parse($line) or die("Could not parse line: $line");
     my @line = $csv->fields;
     # my $student = column("First Name", @line) . " " . column("Last Name", @line);
-    my $student = column("Name", @line);
+    # my $student = column("Name", @line);
+    my $student = column("First Name", @line);
     # LOG($student);
     ++$num_students;
     foreach my $la (@LAs) {
