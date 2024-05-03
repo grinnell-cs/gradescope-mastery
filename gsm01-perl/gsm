@@ -348,10 +348,12 @@ sub underline($$) {
 sub emailStudent(@) {
   my (@fields) = @_;
 
-  my $fname = column("First Name", @fields);
-  my $lname = column("Last Name", @fields);
-  my $name = "$fname $lname";
-  # my $name = column("Name", @fields);
+  my $name = column("Name", @fields);
+  if (!$name) {
+    my $fname = column("First Name", @fields);
+    my $lname = column("Last Name", @fields);
+    $name = "$fname $lname";
+  }
   my $email = column("Email", @fields);
   my $uid  = $email;
   $uid =~ s/@.*//;
@@ -368,10 +370,12 @@ sub studentReport($) {
   $csv->parse($row) or die("Could not parse line: $row");
   my @line = $csv->fields;
 
-  my $fname = column("First Name", @line);
-  my $lname = column("Last Name", @line);
-  my $name = "$fname $lname";
-  # my $name = column("Name", @line);
+  my $name = column("Name", @line);
+  if (!$name) {
+    my $fname = column("First Name", @line);
+    my $lname = column("Last Name", @line);
+    $name = "$fname $lname";
+  }
   my $email = column("Email", @line);
   my $uid = $email;
   $uid =~ s/@.*//;
@@ -595,7 +599,11 @@ OPENING
         }
       }
       if (!$completed) {
-        $lasText .= "[ ] LA: $la\n";
+        if ($la =~ m/:/) {
+          $lasText .= "[ ] LA $la\n";
+        } else {
+          $lasText .= "[ ] LA: $la\n";
+        }
       }
     } # foreach
     $lasGrade = computeGradeComponent($lasPassed, @lasLevels);
@@ -901,8 +909,10 @@ sub summarizeLAs() {
     $csv->parse($line) or die("Could not parse line: $line");
     my @line = $csv->fields;
     # my $student = column("First Name", @line) . " " . column("Last Name", @line);
-    # my $student = column("Name", @line);
-    my $student = column("First Name", @line);
+    my $student = column("Name", @line);
+    if (!$student) {
+      $student = column("First Name", @line);
+    }
     # LOG($student);
     ++$num_students;
     foreach my $la (@LAs) {
@@ -944,6 +954,7 @@ sub updateSettings() {
   foreach my $entry ($config->directives()) {
     my $val = $config->get($entry);
     $settings{$entry} = $val;
+    LOG("Setting $entry to $val.");
   } # foreach
 
   # Update some of the arrays
@@ -1023,8 +1034,14 @@ for (my $i = 0; $i <= $#headings; $i++) {
     my $heading = $h;
     $h =~ s/^Incomplete //;
     # LOG($h);
+    my $la = "";
     if ($h =~ m/^LA: (.*) \((Phase \d),/) {
-      my $la = "$1 ($2)";
+      $la = "$1 ($2)";
+    }
+    if ($h =~ m/^LA (.*) \[/) {
+      $la = "$1";
+    }
+    if ($la) {
       if ($LAcols{$la}) {
         $LAcols{$la} .= ",$i";
       } else {
@@ -1065,6 +1082,10 @@ for (my $i = 0; $i <= $#headings; $i++) {
 
 @readings = sort @readings;
 @labs = sort @labs;
+if ($settings{'sortLAs'}) {
+  LOG("Sorting LAs");
+  @LAs = sort @LAs;
+}
 
 # Handle actions
 switch ($action) {
