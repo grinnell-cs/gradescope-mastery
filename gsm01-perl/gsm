@@ -203,12 +203,14 @@ sub calculateSpending($$$$$)  {
 sub column($@) {
   my ($name, @fields) = @_;
   my $col = $columns{$name};
-  if ($col) {
-    LOG("$name is column $col");
+  if (defined($col)) {
+    my $result = $fields[$col];
+    LOG("$name is column $col [$result]");
+    return $result;
   } else {
     LOG("$name is an undefined column");
+    return $col;
   }
-  return $fields[$col];
 } # grab a column from the data
 
 # computeGradeComponent($count,@levels)
@@ -908,28 +910,29 @@ sub summarizeLAs() {
     chomp($line);
     $csv->parse($line) or die("Could not parse line: $line");
     my @line = $csv->fields;
-    # my $student = column("First Name", @line) . " " . column("Last Name", @line);
     my $student = column("Name", @line);
     if (!$student) {
       $student = column("First Name", @line);
     }
-    # LOG($student);
-    ++$num_students;
-    foreach my $la (@LAs) {
-      my $completed = 0;
-      foreach my $col (split(",", $LAcols{$la})) {
-        my $grade = gradeSU($line[$col]);
-        if ($grade eq "S"  ) {
-          $completed = 1;
-          # LOG("  completed $la on $headings[$col]");
+    if ($student =~ m/Dropped/i) {
+    } else {
+      ++$num_students;
+      foreach my $la (@LAs) {
+        my $completed = 0;
+        foreach my $col (split(",", $LAcols{$la})) {
+          my $grade = gradeSU($line[$col]);
+          if ($grade eq "S"  ) {
+            $completed = 1;
+            # LOG("  completed $la on $headings[$col]");
+          }
         }
-      }
-      if ($completed) {
-        $counts{$la} += 1;
-      } else {
-        $missing{$la} .= "; $student";
-      } # if (!$completed)
-    }
+        if ($completed) {
+          $counts{$la} += 1;
+        } else {
+          $missing{$la} .= "; $student";
+        } # if (!$completed)
+      } # foreach
+    } # if !dropped
   } # while
 
   # Print the results
