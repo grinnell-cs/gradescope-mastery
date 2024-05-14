@@ -278,6 +278,7 @@ sub gradeSU($) {
   my ($num) = @_;
   my $grade = "U";
   if ($num eq "1.0") { $grade = "S"; }
+  if ($num && ($num < 0)) { $grade = "?"; }
   return $grade;
 } # gradeSU
 
@@ -417,6 +418,7 @@ Notation:
   [E]: Excellent (on Mini-Projects)
   [M]: Meets expectations (on Mini-Projects)
   [R]: Recommended redo (on Mini-Projects)
+  [?]: Under review
 
 OPENING
 
@@ -592,15 +594,24 @@ OPENING
     my $lasText = "";
     foreach my $la (@LAs) {
       my $completed = 0;
+      my $reported = 0;
       foreach my $col (split(",", $LAcols{$la})) {
         my $grade = gradeSU($line[$col]);
-        if ((!$completed) && ($grade eq "S")) {
+        if ((!$completed) && (!$reported) && ($grade eq "S")) {
           $completed = 1;
           ++$lasPassed;
           $lasText .= "[S] $headings[$col]\n";
         }
-      }
-      if (!$completed) {
+        if ((!$reported) && ($grade eq "?")) {
+          $reported = 1;
+          if ($la =~ m/:/) {
+            $lasText .= "[?] LA $la\n";
+          } else {
+            $lasText .= "[?] LA: $la\n";
+          }
+        } # if ?
+      } # foreach
+      if ((!$completed) && (!$reported)) {
         if ($la =~ m/:/) {
           $lasText .= "[ ] LA $la\n";
         } else {
