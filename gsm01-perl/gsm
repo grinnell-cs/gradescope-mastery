@@ -90,10 +90,14 @@ my %settings = (
 
   processLAs => 0,              # Do we process LAs?
   lasCount => 0,
-  lasLevels => [ qw(1 1 1 1) ], # A,B,C,D
+  lasLevels => "1,1,1,1",       # A,B,C,D
 
   processMPs => 0,              # Do we process MPs
   mpsCount => 0,        
+  mpsA => "4,1,0",              # E,M,R
+  mpsB => "3,1,0",              # E,M,R
+  mpsC => "2,1,0",              # E,M,R
+  mpsD => "1,1,0",              # E,M,R
 
   processLabs => 0,             # Do we process labs?
   labsCount => 0,               
@@ -111,10 +115,10 @@ my %settings = (
 
 my @lasLevels;          # A,B,C,D
 
-my @mpsA = (5,3,0);     # E,M,R
-my @mpsB = (3,4,1);     # E,M,R
-my @mpsC = (2,4,2);     # E,M,R
-my @mpsD = (1,3,2);     # E,M,R
+my @mpsA = (9,0,0);     # E,M,R
+my @mpsB = (8,0,1);     # E,M,R
+my @mpsC = (7,0,2);     # E,M,R
+my @mpsD = (6,0,2);     # E,M,R
 
 my @quizzesLevels = (16,13,10,5,0);       # A,B,C,D,F
 
@@ -153,6 +157,7 @@ my @MPv0s;      # The indices of v0 of each MP
 my @MPv1s;      # The indices of v1 (redo) of each MP
 my @MPv2s;      # The indices of v2 (re-redo) of each MP
 my @MPv3s;      # The indices of v3 (re-redo) of each MP
+my @MPv4s;      # The indices of v4 (re-redo) of each MP
 
 my @quizzes;    # An array of potential quizzes, mapping to indices
 my @makeups;    # An array of potential quiz makeups, mapping to indices
@@ -536,7 +541,7 @@ OPENING
     my $mpsText = "";
     for (my $mp = 1; $mp <= $settings{'mpsCount'}; $mp++) {
       LOG("    Processing MP $mp");
-      my @cols = ($MPv0s[$mp], $MPv1s[$mp], $MPv2s[$mp], $MPv3s[$mp]);
+      my @cols = ($MPv0s[$mp], $MPv1s[$mp], $MPv2s[$mp], $MPv3s[$mp], $MPv4s[$mp]);
       my $bestnum = 0;
       my $heading = "MP $mp";
       my $nullScore = 1;
@@ -823,7 +828,7 @@ OPENING
     my $maxLevel = max($mpsLevel, $lasLevel);
     my $grade = $letters[$maxLevel];
     if ($mpsLevel + $lasLevel != 2*$maxLevel) {
-      $grade = $letters[$maxLevel-1] . "-";
+      $grade = $letters[$maxLevel] . "+";
     }
     my $fixedGrade;
     foreach my $entry (@grades) {
@@ -975,6 +980,18 @@ sub updateSettings() {
   if ($settings{'lasLevels'}) { 
     @lasLevels = split(",",$settings{'lasLevels'}); 
   }
+  if ($settings{'mpsA'}) {
+    @mpsA = split(",",$settings{'mpsA'}); 
+  }
+  if ($settings{'mpsB'}) {
+    @mpsB = split(",",$settings{'mpsB'}); 
+  }
+  if ($settings{'mpsC'}) {
+    @mpsC = split(",",$settings{'mpsC'}); 
+  }
+  if ($settings{'mpsD'}) {
+    @mpsC = split(",",$settings{'mpsD'}); 
+  }
 } # updateSettings
 
 # +------+-----------------------------------------------------------
@@ -1087,6 +1104,9 @@ for (my $i = 0; $i <= $#headings; $i++) {
     }
     elsif ($heading =~ m/^Mini-Project (\d+) Third Redo/i) {
       $MPv3s[$1] = $i;
+    }
+    elsif ($heading =~ m/^Mini-Project (\d+) Ultimate Submission/i) {
+      $MPv4s[$1] = $i;
     }
     elsif (($heading =~ m/^Pre/) || ($heading =~ m/^Post/)) {
       push @meta, $heading;
