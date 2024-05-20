@@ -601,15 +601,11 @@ OPENING
           $completed = 1;
           ++$lasPassed;
           $lasText .= "[S] $headings[$col]\n";
-        }
+        } # if grade is S
         if ((!$reported) && ($grade eq "?")) {
           $reported = 1;
-          if ($la =~ m/:/) {
-            $lasText .= "[?] LA $la\n";
-          } else {
-            $lasText .= "[?] LA: $la\n";
-          }
-        } # if ?
+          $lasText .= "[?] $headings[$col]\n";
+        } # if grade is question mark.
       } # foreach
       if ((!$completed) && (!$reported)) {
         if ($la =~ m/:/) {
@@ -617,7 +613,7 @@ OPENING
         } else {
           $lasText .= "[ ] LA: $la\n";
         }
-      }
+      } # if neither completed nor reported
     } # foreach
     $lasGrade = computeGradeComponent($lasPassed, @lasLevels);
   
