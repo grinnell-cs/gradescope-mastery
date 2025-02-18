@@ -226,6 +226,7 @@ sub computeGradeComponent($@) {
   if ($count >= $levels[0]) { return "A"; }
   elsif ($count >= $levels[1]) { return "B"; }
   elsif ($count >= $levels[2]) { return "C"; }
+  elsif ($count >= $levels[3]) { return "D"; }
   else { return "F"; }
 } # computeGradeComponent
 
@@ -259,9 +260,9 @@ sub gradeNRME($) {
   if ($num eq "") { return " "; }
   my $grade = "I";
   $num = int($num);
-  if ($num >= 2.5) { $grade = "E"; }
-  elsif ($num >= 1.5) { $grade = "M"; }
-  elsif ($num >= 0.5) { $grade = "R"; }
+  if ($num >= 3.5) { $grade = "E"; }
+  elsif ($num >= 2.5) { $grade = "M"; }
+  elsif ($num >= 1.5) { $grade = "R"; }
   return $grade;
 } # gradeNRME
 
