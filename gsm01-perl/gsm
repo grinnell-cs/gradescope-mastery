@@ -922,16 +922,38 @@ OPENING
   }
 
   if ($settings{'includeGrades'}) {
-    my @letters = ( "A", "B", "C", "D", "F" );
-    my %letterLevels = ( "A" => 0, "B" => 1, "C" => 2, "D" => 3, "F" => 4, "?" => 0 );
+    # Our letter grades in an array along with a hash to convert from
+    # letter grade to position in the array. Lower numbers are higher
+    # grades.
+    my @letters = ( "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "D-", "F" );
+    my %letterLevels;
+    for (my $i = 0; $i <= $#letters; $i++) {
+      $letterLevels{$letters[$i]} = $i;
+    }
+    my $cGrade = $letterLevels{"C"};
+    my $dGrade = $letterLevels{"D"};
+    my $fGrade = $letterLevels{"F"};
+
+    # Here we set up the base grade
     my $mpsLevel = $letterLevels{$mpsGrade};
     my $lasLevel = $letterLevels{$lasGrade};
-    my $maxLevel = max($mpsLevel, $lasLevel);
-    my $grade = $letters[$maxLevel];
-    if ($mpsLevel + $lasLevel != 2*$maxLevel) {
-      $grade = $letters[$maxLevel] . "+";
+    my $baseGrade = max($mpsLevel, $lasLevel);
+    if ($mpsLevel + $lasLevel != 2*$baseGrade) {
+      $baseGrade -= 1;
     }
-    my $fixedGrade;
+
+    # Here we update the base grade based on the reductions.
+    my $adjustedGrade = $baseGrade + $tokensReduction + $missedReduction;
+    if (($adjustedGrade > $cGrade) && ($baseGrade <= $cGrade)) {
+      $adjustedGrade = $cGrade;
+    } elsif (($adjustedGrade > $dGrade) && ($baseGrade < $fGrade)) {
+      $adjustedGrade = $dGrade;
+    } elsif ($adjustedGrade > $fGrade) {
+      $adjustedGrade = $fGrade;
+    }
+
+    # Grades can also be set in a specified file.
+    my $fixedGrade = "";
     foreach my $entry (@grades) {
       if ($entry =~ m/^$uid,/) {
         my @entry = split /,/, $entry;
@@ -940,8 +962,11 @@ OPENING
     } # foreach
     if ($fixedGrade) {
       print $STUDENT "Grade: $fixedGrade\n";
+    } elsif ($adjustedGrade == $baseGrade) {
+      print $STUDENT "Prospective grade: $letters[$baseGrade]\n";
     } else {
-      print $STUDENT "Prospective grade: $grade\n";
+      print $STUDENT "Base prospective grade:     $letters[$baseGrade]\n";
+      print $STUDENT "Adjusted prospective grade: $letters[$adjustedGrade]\n";
     } # 
   } # if $includeGrades
 
