@@ -111,6 +111,14 @@ my %settings = (
   processReadings=> 0,          # Do we process readings?
   readingsCount => 0,
 
+  maxMissed => 0,               # How many missed labs + metas + readings are ok
+  missedPerReduction => 2,      # What do we charge?
+
+  processTokens => 0,           # Do we process tokens?
+  initialTokens => 0,
+  tokensPerReduction => 5,      # What do we charge?
+
+  skip => "",
 );
 
 my @lasLevels;          # A,B,C,D
@@ -132,6 +140,8 @@ my $oldTokens = 0;                      # Do we show earned tokens (old model)?
 my $showTokens = 0;                     # Do we show tokens
 my $processTokens = 0;                  # Do we handle overspending?
 my $maxTokenDebt = 10;
+
+my @skip = ();
 
 # +---------+--------------------------------------------------------
 # | Globals |
@@ -217,6 +227,19 @@ sub column($@) {
     return $col;
   }
 } # grab a column from the data
+
+# columnAsInt($name, @fields)
+# Grab a column from the fields. Return it as an integer. If the
+# column is empty, return 0.
+sub columnAsInt($@) {
+  my ($name, @fields) = @_;
+  my $tmp = column($name, @fields);
+  if ($tmp) {
+    return int($tmp);
+  } else {
+    return 0;
+  } # 
+} # columnAsInt
 
 # computeGradeComponent($count,@levels)
 #   Compute the grade on one of the components that just uses
@@ -311,7 +334,7 @@ sub LOGandPRINT($$) {
  my ($port,$msg) = @_;
  LOG($msg);
  print $port $msg, "\n";
-} # sub
+} # LOGandPRINT
 
 # mpGradeCriteria($E,$M,$R,@criteria)
 #   See if the candidate meets the criteria for a particular level
@@ -325,12 +348,33 @@ sub mpGradeCriteria($$$@) {
 
 # nullToZero($val)
 #   If the value is null or the empty string, returns 0
-#   Otehrwise, returns the vaue
+#   Otherwise, returns the value
 sub nullToZero($) {
   my ($val) = @_;
   if (!$val) { return "0"; }
   else { return $val; }
 } # nullToZero
+
+# reductionToString($val)
+#   Given a grade reduction (in 1/3 letter grades, express it in text)
+sub reductionToString($) {
+  my ($val) = @_;
+  if ($val < 3) {
+    return "$val/3 of a letter grade";
+  } elsif ($val == 3) {
+    return "1 letter grade";
+  } else {
+    my $whole = int($val / 3);
+    my $remainder = $val % 3;
+    if ($remainder) {
+      return "$whole and $remainder/3 of a letter grade";
+    } elsif ($whole == 1) {
+      return "one letter grade";
+    } else { 
+      return "$whole letter grades";
+    }
+  }
+} # reductionToString
 
 # underline($str, $char)
 #   Create an underline for $str using the appropriate number of
@@ -395,6 +439,12 @@ sub studentReport($) {
     LOG("Skipping $name; dropped the class.");
     return;
   }
+  foreach my $pattern (@skip) {
+    if ($name =~ m/$pattern/i) {
+      LOG("Skipping $name; in skip list.");
+      return;
+    }
+  } 
 
   if (! -d "reports") { mkdir "reports"; }
   open(my $STUDENT, "> reports/$uid.txt");
@@ -634,8 +684,8 @@ OPENING
     }
     print $STUDENT $lasText . "\n";
   } # if processLAs
-
-  # Tokens
+ 
+  # Tokens (old version)
   if ($oldTokens) {
     LOG("  Processing tokens");
     header($STUDENT, "Tokens", "-");
@@ -748,6 +798,30 @@ OPENING
     print $STUDENT $metaText . "\n";
   }
 
+  # Tokens (new version)
+  my $tokens = 0;
+  if ($settings{'processTokens'}) {
+    LOG("  Processing tokens");
+    my $initialTokens = $settings{'initialTokens'};
+    my $tokensEarned = columnAsInt("Tokens earned", @line);
+    my $tokensSpent = columnAsInt("Tokens spent", @line);
+    $tokens = $initialTokens + $tokensEarned + $tokensSpent;
+    if ($tokens >= 0) {
+      header($STUDENT,
+             "Tokens ($tokens remaining) (details on Gradescope)",
+             "-");
+    } else {
+      my $tok = -$tokens;
+      header($STUDENT,
+             "Tokens ($tok overspent) (details on Gradescope)",
+             "-");
+    }
+    print $STUDENT "Initial tokens: $initialTokens\n";
+    print $STUDENT "Tokens earned:  $tokensEarned\n";
+    print $STUDENT "Tokens spent:   " . -$tokensSpent . "\n";
+    print $STUDENT "\n";
+  } # if processTokens
+
   # A hack for before the end of the semester
   if (!$settings{'includeGrades'}) {
     $readingsGrade = " ";
@@ -768,39 +842,43 @@ OPENING
   header($STUDENT, "Final Computations", "-");
   if ($settings{'processReadings'}) { 
     print $STUDENT 
-          "Readings: $readingsGrade ($readingsPassed / $settings{'readingsCount'})\n"; 
+          "Readings:  $readingsGrade ($readingsPassed / $settings{'readingsCount'})\n"; 
   }
   if ($settings{'processLabs'}) { 
     print $STUDENT 
-          "Labs:     $labsGrade ($labsPassed / $settings{'labsCount'})\n"; 
+          "Labs:      $labsGrade ($labsPassed / $settings{'labsCount'})\n"; 
   }
   if ($settings{'processQuizzes'}) { 
     print $STUDENT 
-          "Quizzes:  $quizzesGrade ($quizzesPassed / $settings{'quizzesCount'})\n"; 
+          "Quizzes:   $quizzesGrade ($quizzesPassed / $settings{'quizzesCount'})\n"; 
   }
+  if ($settings{'processMetas'}) {
+    print $STUDENT "Reflections: ($metasPassed / $settings{'metasCount'})\n";
+  }
+  print $STUDENT "\n";
+
   if ($settings{'processMPs'}) {
     print $STUDENT
-          "MPs:      $mpsGrade ($mpEs Es, $mpMs Ms, and $mpRs Rs)\n";
+          "MPs:       $mpsGrade ($mpEs Es, $mpMs Ms, and $mpRs Rs)\n";
   }
   if ($settings{'processLAs'}) {
     print $STUDENT 
-          "LAs:      $lasGrade ($lasPassed / $settings{'lasCount'})\n";
+          "LAs:       $lasGrade ($lasPassed / $settings{'lasCount'})\n";
   }
   print $STUDENT "\n";
 
   if ($showTokens) {
     print $STUDENT "Tokens:     $tokenCount\n";
   }
-  if ($settings{'processMetas'}) {
-    print $STUDENT "Metas:      $metasPassed / $settings{'metasCount'}\n";
-  }
+
+  my $missedReduction = 0;
   if ($readingsMissed < 0) { $readingsMissed = 0; }
   if ($labsMissed < 0) { $labsMissed = 0; }
   if ($metasMissed < 0) { $metasMissed = 0; }
   my $totalMissed = $readingsMissed + $labsMissed + $metasMissed;
   my $needsComma = 0;
   if ($totalMissed) {
-    print $STUDENT "Missed:     $totalMissed (";
+    print $STUDENT "Missed:      $totalMissed (";
     if ($readingsMissed) {
       print $STUDENT ($readingsMissed == 1) ? "1 reading" : "$readingsMissed readings";
       $needsComma = 1;
@@ -814,8 +892,34 @@ OPENING
       if ($needsComma) { print $STUDENT ", "; }
       print $STUDENT ($metasMissed == 1) ? "1 metacognitive reflection" : "$metasMissed metacognitive reflections";
     }
-    print $STUDENT ")\n\n";
+    print $STUDENT ")\n";
+    my $maxMissed = $settings{'maxMissed'};
+    if ($totalMissed > $maxMissed) {
+      my $missedPerReduction = $settings{'missedPerReduction'};
+      $missedReduction = $totalMissed - $maxMissed + $missedPerReduction - 1;
+      $missedReduction = int($missedReduction/$missedPerReduction);
+      $missedReduction = min($missedReduction, 6);
+      print $STUDENT "  Reduction:     " . reductionToString($missedReduction) . "\n";
+    }
+
   } # if things were missed
+
+  my $tokensReduction = 0;
+  if ($settings{'processTokens'}) {
+    print $STUDENT "Tokens:      $tokens\n";
+    if ($tokens < 0) {
+      my $tokensPerReduction = $settings{'tokensPerReduction'};
+      my $tmp = -$tokens;
+      $tmp += $tokensPerReduction;
+      $tokensReduction = int($tmp/$tokensPerReduction);
+      $tokensReduction = min($tokensReduction, 6);
+      print $STUDENT "  Reduction:     " . reductionToString($tokensReduction) . "\n";
+    } # if
+  } # if processTokens
+
+  if ($totalMissed || $settings{'processTokens'}) {
+    print $STUDENT "\n";
+  }
 
   if ($settings{'includeGrades'}) {
     my @letters = ( "A", "B", "C", "D", "F" );
@@ -905,6 +1009,18 @@ sub reportFinalGradeOld($$$$$$) {
   }
 } # reportFinalGradeOld
 
+# skip(name)
+#   Determine if we should skip a student.
+sub skip($) {
+  my($name) = @_;
+  foreach my $pattern (@skip) {
+    if ($name =~ m/$pattern/i) {
+      return 1;
+    }
+  }
+  return 0;
+} # skip
+
 # summarizeLAs()
 #   Prints a summary of all the LAs
 sub summarizeLAs() {
@@ -927,7 +1043,7 @@ sub summarizeLAs() {
     if (!$student) {
       $student = column("First Name", @line);
     }
-    if ($student =~ m/Dropped/i) {
+    if (($student =~ m/Dropped/i) || (skip($student))) {
     } else {
       ++$num_students;
       foreach my $la (@LAs) {
@@ -988,6 +1104,9 @@ sub updateSettings() {
   }
   if ($settings{'mpsD'}) {
     @mpsC = split(",",$settings{'mpsD'}); 
+  }
+  if ($settings{'skip'}) {
+    @skip = split(",",$settings{'skip'});
   }
 } # updateSettings
 
